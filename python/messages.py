@@ -1,21 +1,28 @@
-"""Offline reminder templates containing only invoice facts."""
+"""Deterministic reminder messages that work without keys or internet access."""
 
 REQUESTS = {
     "friendly": (
-        "When you have a moment, please arrange payment. "
-        "If you have a question about the invoice, please reply."
+        "Just a friendly reminder to arrange payment when you have a moment. "
+        "If you have a question about the invoice, please reply so we can help."
     ),
     "firm": (
-        "Please arrange payment and reply with an update on its status."
+        "Please arrange payment of the outstanding amount and reply with an "
+        "update on its status. If there is an issue with the invoice, "
+        "please let us know."
     ),
     "final": (
-        "This payment requires your attention. "
-        "Please arrange payment and reply to confirm its status."
+        "Please treat this outstanding payment as a priority. Arrange payment "
+        "and reply to confirm its status, or let us know if there is an issue "
+        "that needs to be resolved."
     ),
 }
 
 
 def build_message(invoice, step, days_overdue):
+    """Render validated invoice facts with a fixed request for the selected step."""
+    if step not in REQUESTS:
+        raise ValueError(f"Unknown reminder step: {step}")
+
     amount = f"{invoice['currency']} {invoice['amount']:.2f}"
 
     return (
