@@ -1,10 +1,4 @@
-"""Payment reminder planner.
-
-Run from inside python/:
-    python plan.py --invoices ../data/invoices.json \
-        --sent ../data/sent.json --today 2026-10-12 \
-        --out ../actions.json
-"""
+"""Payment reminder rules engine and command-line interface."""
 
 import argparse
 import json
@@ -12,6 +6,19 @@ import math
 import re
 from collections import Counter
 from datetime import date
+
+from messages import build_message
+
+# Minimum overdue days, reminder step, approval requirement.
+STEPS = (
+    (3, "friendly", False),
+    (10, "firm", True),
+    (24, "final", True),
+)
+STEP_RANK = {
+    step: rank
+    for rank, (_, step, _) in enumerate(STEPS)
+}
 
 
 def parse_date(value):
@@ -59,7 +66,7 @@ def validation_reason(invoice, today, duplicate_ids):
 
 
 def build_plan(invoices, sent, today):
-    """Validate invoices; reminder selection is the next implementation step."""
+    """Return a deterministic plan without modifying inputs or sending messages."""
     today_date = parse_date(today)
 
     # Count first so every occurrence of a duplicate ID is excluded.
@@ -70,16 +77,72 @@ def build_plan(invoices, sent, today):
         if count > 1
     }
 
-    # Keying by ID reports a duplicate only once.
+    # Retain the highest known reminder step for each invoice.
+    highest_sent = {}
+    for reminder in sent:
+        invoice_id = reminder.get("invoice_id")
+        step = reminder.get("step")
+
+        if not isinstance(invoice_id, str) or invoice_id not in counts:
+            continue
+        if not isinstance(step, str) or step not in STEP_RANK:
+            continue
+
+        highest_sent[invoice_id] = max(
+            highest_sent.get(invoice_id, -1),
+            STEP_RANK[step],
+        )
+
     skipped = {}
+    actions = []
+
     for invoice in invoices:
+        invoice_id = invoice["id"]
         reason = validation_reason(invoice, today_date, duplicate_ids)
+
         if reason is not None:
-            skipped[invoice["id"]] = reason
+            skipped[invoice_id] = reason
+            continue
+
+        # Validation has already rejected invalid or future payment dates.
+        if invoice.get("paid_date") is not None:
+            continue
+
+        days_overdue = (
+            today_date - parse_date(invoice["due_date"])
+        ).days
+
+        # Search highest threshold first; generate at most one action.
+        selected = next(
+            (
+                rule
+                for rule in reversed(STEPS)
+                if days_overdue >= rule[0]
+            ),
+            None,
+        )
+        if selected is None:
+            continue
+
+        _, step, needs_approval = selected
+
+        if highest_sent.get(invoice_id, -1) >= STEP_RANK[step]:
+            continue
+
+        actions.append({
+            "invoice_id": invoice_id,
+            "step": step,
+            "needs_approval": needs_approval,
+            "days_overdue": days_overdue,
+            "message": build_message(invoice, step, days_overdue),
+        })
 
     return {
         "today": today,
-        "actions": [],
+        "actions": sorted(
+            actions,
+            key=lambda action: action["invoice_id"],
+        ),
         "skipped": [
             {"invoice_id": invoice_id, "reason": skipped[invoice_id]}
             for invoice_id in sorted(skipped)
