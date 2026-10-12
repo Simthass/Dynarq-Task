@@ -1,52 +1,103 @@
-"""The owner's page (part 2). Standard library only, no install needed.
-
-Run from inside python/:
-
-    python app.py
-
-Environment variables:
-    PORT      port to listen on, default 8000
-    DATA_DIR  folder with invoices.json and sent.json, default ../data
-    TODAY     date as YYYY-MM-DD, default the real date
-"""
+"""Owner's page. Run from python/: python app.py."""
 
 import os
+import sys
+from dataclasses import dataclass
 from datetime import date
-from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlsplit
 
-PORT = int(os.environ.get("PORT", "8000"))
-DATA_DIR = os.environ.get("DATA_DIR", "../data")
-TODAY = os.environ.get("TODAY") or date.today().isoformat()
+from plan import build_plan, parse_date, read_json
+from views import render_page
 
 
-class Handler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path != "/":
-            self.send_error(404)
-            return
-        # TODO: use build_plan from plan.py and show today's plan (README part 2).
-        body = (
-            "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-            "<title>Payment reminders</title></head><body>"
-            "<h1>Payment reminders</h1>"
-            f"<p>Placeholder page. Today is {escape(TODAY)}. Data folder: {escape(DATA_DIR)}.</p>"
-            "</body></html>"
+@dataclass(frozen=True)
+class Config:
+    port: int
+    data_dir: Path
+    today: str
+
+    @classmethod
+    def from_env(cls, environment=None):
+        env = os.environ if environment is None else environment
+
+        try:
+            port = int(env.get("PORT", "8000"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "PORT must be an integer between 1 and 65535"
+            ) from exc
+
+        if not 1 <= port <= 65535:
+            raise ValueError("PORT must be an integer between 1 and 65535")
+
+        today = env.get("TODAY", date.today().isoformat())
+        try:
+            parse_date(today)
+        except ValueError as exc:
+            raise ValueError(
+                "TODAY must be a real date in YYYY-MM-DD format"
+            ) from exc
+
+        return cls(
+            port=port,
+            data_dir=Path(env.get("DATA_DIR", "../data")),
+            today=today,
         )
-        data = body.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+
+
+def load_plan(config):
+    invoices = read_json(config.data_dir / "invoices.json")
+    sent = read_json(config.data_dir / "sent.json")
+    return invoices, build_plan(invoices, sent, config.today)
+
+
+def create_server(config):
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if urlsplit(self.path).path != "/":
+                self.send_error(404)
+                return
+
+            try:
+                invoices, plan = load_plan(config)
+                body = render_page(config.today, invoices, plan)
+                status = 200
+            except ValueError as exc:
+                body = render_page(config.today, error=str(exc))
+                status = 503
+
+            data = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+    return ThreadingHTTPServer(("127.0.0.1", config.port), Handler)
 
 
 def main():
-    server = ThreadingHTTPServer(("", PORT), Handler)
-    print(f"Serving on http://localhost:{PORT}/")
-    server.serve_forever()
+    try:
+        config = Config.from_env()
+        server = create_server(config)
+    except (ValueError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Serving on http://localhost:{config.port}/")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
