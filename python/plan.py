@@ -4,12 +4,12 @@ import argparse
 import json
 import math
 import re
+import sys
 from collections import Counter
 from datetime import date
 
 from messages import build_message
 
-# Minimum overdue days, reminder step, approval requirement.
 STEPS = (
     (3, "friendly", False),
     (10, "firm", True),
@@ -65,11 +65,33 @@ def validation_reason(invoice, today, duplicate_ids):
     return None
 
 
+def validate_inputs(invoices, sent):
+    """Reject structures outside the documented input contract."""
+    for name, records in (("invoices", invoices), ("sent", sent)):
+        if not isinstance(records, list):
+            raise ValueError(f"{name} must contain a JSON list")
+
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise ValueError(
+                    f"{name}[{index}] must be a JSON object"
+                )
+
+            # These fields are guaranteed by the task specification.
+            # Amount and dates remain invoice-level validation errors.
+            if name == "invoices":
+                for field in ("id", "customer", "currency"):
+                    if not isinstance(record.get(field), str):
+                        raise ValueError(
+                            f"invoices[{index}].{field} must be text"
+                        )
+
+
 def build_plan(invoices, sent, today):
     """Return a deterministic plan without modifying inputs or sending messages."""
     today_date = parse_date(today)
+    validate_inputs(invoices, sent)
 
-    # Count first so every occurrence of a duplicate ID is excluded.
     counts = Counter(invoice["id"] for invoice in invoices)
     duplicate_ids = {
         invoice_id
@@ -77,7 +99,6 @@ def build_plan(invoices, sent, today):
         if count > 1
     }
 
-    # Retain the highest known reminder step for each invoice.
     highest_sent = {}
     for reminder in sent:
         invoice_id = reminder.get("invoice_id")
@@ -104,7 +125,6 @@ def build_plan(invoices, sent, today):
             skipped[invoice_id] = reason
             continue
 
-        # Validation has already rejected invalid or future payment dates.
         if invoice.get("paid_date") is not None:
             continue
 
@@ -112,7 +132,6 @@ def build_plan(invoices, sent, today):
             today_date - parse_date(invoice["due_date"])
         ).days
 
-        # Search highest threshold first; generate at most one action.
         selected = next(
             (
                 rule
@@ -150,9 +169,23 @@ def build_plan(invoices, sent, today):
     }
 
 
+def reject_json_constant(value):
+    """NaN and Infinity are Python extensions, not valid JSON numbers."""
+    raise ValueError(f"Invalid JSON number: {value}")
+
+
 def read_json(path):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f, parse_constant=reject_json_constant)
+    except OSError as exc:
+        raise ValueError(
+            f"Cannot read '{path}': {exc.strerror or str(exc)}"
+        ) from exc
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError(
+            f"Invalid JSON in '{path}': {exc}"
+        ) from exc
 
 
 def main():
@@ -165,14 +198,36 @@ def main():
     parser.add_argument("--out", required=True, help="path to write the plan JSON")
     args = parser.parse_args()
 
-    invoices = read_json(args.invoices)
-    sent = read_json(args.sent)
-    plan = build_plan(invoices, sent, args.today)
+    try:
+        try:
+            parse_date(args.today)
+        except ValueError as exc:
+            raise ValueError(
+                "--today must be a real date in YYYY-MM-DD format"
+            ) from exc
 
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(plan, f, indent=2)
-        f.write("\n")
+        invoices = read_json(args.invoices)
+        sent = read_json(args.sent)
+        plan = build_plan(invoices, sent, args.today)
+
+        # Serialize before opening the destination.
+        # Invalid input must not overwrite an existing output file.
+        output = json.dumps(plan, indent=2, allow_nan=False) + "\n"
+
+        try:
+            with open(args.out, "w", encoding="utf-8") as f:
+                f.write(output)
+        except OSError as exc:
+            raise ValueError(
+                f"Cannot write '{args.out}': {exc.strerror or str(exc)}"
+            ) from exc
+
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
