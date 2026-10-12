@@ -28,12 +28,35 @@ def text(value):
     return escape(str(value), quote=True)
 
 
-def render_action(action, invoice):
+def render_action(action, invoice, decision=None, csrf_token=""):
     approval = (
         "Awaiting approval"
         if action["needs_approval"]
         else "No approval required"
     )
+    if decision is not None:
+        approval = decision.capitalize()
+
+    controls = ""
+    if action["needs_approval"]:
+        controls = f"""
+        <form method="post" action="/decision">
+          <input type="hidden" name="invoice_id"
+            value="{text(action['invoice_id'])}">
+          <input type="hidden" name="step"
+            value="{text(action['step'])}">
+          <input type="hidden" name="csrf_token"
+            value="{text(csrf_token)}">
+          <button type="submit" name="decision" value="approved"
+            aria-label="Approve {text(action['step'])} reminder for {text(action['invoice_id'])}">
+            Approve
+          </button>
+          <button type="submit" name="decision" value="rejected"
+            aria-label="Reject {text(action['step'])} reminder for {text(action['invoice_id'])}">
+            Reject
+          </button>
+        </form>"""
+
     amount = f"{invoice['currency']} {invoice['amount']:.2f}"
 
     return f"""
@@ -48,10 +71,20 @@ def render_action(action, invoice):
       </dl>
       <h4>Message preview</h4>
       <pre>{text(action['message'])}</pre>
+      {controls}
     </article>"""
 
 
-def render_page(today, invoices=None, plan=None, error=None):
+def render_page(
+    today,
+    invoices=None,
+    plan=None,
+    error=None,
+    decisions=None,
+    csrf_token="",
+):
+    decisions = {} if decisions is None else decisions
+
     if error is not None:
         content = f"""
         <section aria-labelledby="error-heading">
@@ -65,14 +98,17 @@ def render_page(today, invoices=None, plan=None, error=None):
         by_id = {invoice["id"]: invoice for invoice in invoices}
         actions = plan["actions"]
         skipped = plan["skipped"]
+
         approval_count = sum(
-            action["needs_approval"] for action in actions
+            action["needs_approval"]
+            and (today, action["invoice_id"], action["step"]) not in decisions
+            for action in actions
         )
 
         content = f"""
         <p class="summary">
           {len(actions)} reminders to review ·
-          {approval_count} need approval ·
+          {approval_count} awaiting approval ·
           {len(skipped)} invoices need correction
         </p>
         <section aria-labelledby="reminders-heading">
@@ -80,7 +116,14 @@ def render_page(today, invoices=None, plan=None, error=None):
 
         if actions:
             content += "".join(
-                render_action(action, by_id[action["invoice_id"]])
+                render_action(
+                    action,
+                    by_id[action["invoice_id"]],
+                    decisions.get(
+                        (today, action["invoice_id"], action["step"])
+                    ),
+                    csrf_token,
+                )
                 for action in actions
             )
         else:
@@ -181,10 +224,29 @@ def render_page(today, invoices=None, plan=None, error=None):
     .error, h3, strong {{
       overflow-wrap: anywhere;
     }}
+    form {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }}
+    button {{
+      min-height: 44px;
+      padding: 10px 18px;
+      border: 1px solid #174fa3;
+      border-radius: 8px;
+      background: white;
+      color: #174fa3;
+      font: inherit;
+      cursor: pointer;
+    }}
+    button[value="approved"] {{
+      background: #174fa3;
+      color: white;
+    }}
     a {{
       color: #174fa3;
     }}
-    a:focus-visible {{
+    a:focus-visible, button:focus-visible {{
       outline: 3px solid #174fa3;
       outline-offset: 4px;
     }}
@@ -206,7 +268,8 @@ def render_page(today, invoices=None, plan=None, error=None):
     <header>
       <h1>Payment reminders</h1>
       <p>Plan for <time datetime="{text(today)}">{text(today)}</time></p>
-      <p>Review reminder messages here. Nothing is sent by this app.</p>
+      <p>Review reminder messages here. Nothing is sent by this app.
+         Decisions are kept until the app restarts.</p>
     </header>
     {content}
   </main>
